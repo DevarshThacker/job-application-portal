@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Job Application Portal - one app server (nginx + Node + CodeDeploy agent). Deploy once per server.
+
+Parameters:
+  Environment: { Type: String, AllowedValues: [staging, production] }
+  ServerName: { Type: String, Description: "Name tag, e.g. jobportal-staging or jobportal-prod-1" }
+  SubnetId: { Type: AWS::EC2::Subnet::Id }
+  AppSecurityGroup: { Type: AWS::EC2::SecurityGroup::Id }
+  InstanceType: { Type: String, Default: t3.micro }
+  InstanceProfileName: { Type: String, Default: LabInstanceProfile, Description: Existing Learner Lab instance profile }
+  RootVolumeGb: { Type: Number, Default: 8 }
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  Server:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds: [!Ref AppSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfileName
+      MetadataOptions: { HttpTokens: required, HttpEndpoint: enabled }
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs: { VolumeSize: !Ref RootVolumeGb, VolumeType: gp3, Encrypted: true, DeleteOnTermination: true }
+      Tags:
+        - { Key: Name, Value: !Ref ServerName }
+        - { Key: Environment, Value: !Ref Environment }
+        - { Key: Role, Value: app }
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/jobportal-bootstrap.log) 2>&1
+          set -x
+          dnf install -y nginx postgresql16 ruby wget jq amazon-cloudwatch-agent
+          # Node.js (try newest available LTS-ish package first)
+          for v in 24 22 20; do dnf install -y nodejs$v nodejs$v-npm && break; done
+          id jobportal || useradd --system --home-dir /opt/jobportal --shell /sbin/nologin jobportal
+          mkdir -p /opt/jobportal /etc/jobportal /var/log/jobportal
+          chown jobportal:jobportal /var/log/jobportal
+          echo "${Environment}" > /etc/jobportal/environment
+          systemctl enable --now nginx
+          # CodeDeploy agent
+          cd /tmp
+          wget -q https://aws-codedeploy-${AWS::Region}.s3.${AWS::Region}.amazonaws.com/latest/install
+          chmod +x install && ./install auto
+          systemctl enable --now codedeploy-agent
+          echo BOOTSTRAP_DONE > /var/log/jobportal-bootstrap.done
+
+Outputs:
+  InstanceId: { Value: !Ref Server }
+  PublicIp: { Value: !GetAtt Server.PublicIp }
+  PrivateIp: { Value: !GetAtt Server.PrivateIp }
+  AvailabilityZone: { Value: !GetAtt Server.AvailabilityZone }

@@ -1,0 +1,149 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  CANDIDATE
+  RECRUITER
+  ADMIN
+}
+
+enum JobStatus {
+  OPEN
+  CLOSED
+}
+
+enum EmploymentType {
+  FULL_TIME
+  PART_TIME
+  CONTRACT
+  INTERNSHIP
+  REMOTE
+}
+
+enum ApplicationStatus {
+  APPLIED
+  SHORTLISTED
+  INTERVIEW
+  OFFER
+  REJECTED
+  WITHDRAWN
+}
+
+model User {
+  id           String   @id @default(uuid())
+  name         String
+  email        String   @unique
+  passwordHash String
+  role         Role     @default(CANDIDATE)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  candidateProfile CandidateProfile?
+  recruiterProfile RecruiterProfile?
+  resumes          Resume[]
+  applications     Application[]    @relation("CandidateApplications")
+  statusChanges    ApplicationStatusHistory[]
+
+  @@index([role])
+}
+
+model CandidateProfile {
+  id        String  @id @default(uuid())
+  userId    String  @unique
+  phone     String?
+  location  String?
+  skills    String? 
+  education String?
+  bio       String?
+  user      User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RecruiterProfile {
+  id                 String  @id @default(uuid())
+  userId             String  @unique
+  companyName        String
+  companyDescription String?
+  website            String?
+  user               User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobs               Job[]
+}
+
+model Job {
+  id             String         @id @default(uuid())
+  recruiterId    String
+  title          String
+  companyName    String
+  location       String
+  employmentType EmploymentType
+  salaryRange    String?
+  description    String
+  requirements   String
+  status         JobStatus      @default(OPEN)
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  recruiter    RecruiterProfile @relation(fields: [recruiterId], references: [id], onDelete: Cascade)
+  applications Application[]
+
+  @@index([recruiterId])
+  @@index([status, createdAt])
+  @@index([location])
+  @@index([employmentType])
+}
+
+model Resume {
+  id          String   @id @default(uuid())
+  candidateId String
+  fileName    String
+  storageKey  String   @unique
+  contentType String
+  fileSize    Int
+  uploadedAt  DateTime @default(now())
+
+  candidate    User          @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  applications Application[]
+
+  @@index([candidateId])
+}
+
+model Application {
+  id          String            @id @default(uuid())
+  candidateId String
+  jobId       String
+  resumeId    String
+  status      ApplicationStatus @default(APPLIED)
+  coverNote   String?
+  appliedAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  candidate User   @relation("CandidateApplications", fields: [candidateId], references: [id], onDelete: Cascade)
+  job       Job    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  resume    Resume @relation(fields: [resumeId], references: [id], onDelete: Restrict)
+  history   ApplicationStatusHistory[]
+
+  @@unique([candidateId, jobId])
+  @@index([jobId, status])
+  @@index([candidateId])
+}
+
+model ApplicationStatusHistory {
+  id            String             @id @default(uuid())
+  applicationId String
+  oldStatus     ApplicationStatus?
+  newStatus     ApplicationStatus
+  changedBy     String
+  note          String?
+  changedAt     DateTime           @default(now())
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  actor       User        @relation(fields: [changedBy], references: [id], onDelete: Restrict)
+
+  @@index([applicationId, changedAt])
+}

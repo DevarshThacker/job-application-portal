@@ -1,0 +1,21 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: jobportal-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-jobportal}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-jobportal_dev_pw}
+      POSTGRES_DB: ${POSTGRES_DB:-jobportal}
+    # Host port 5433 avoids clashing with a system PostgreSQL on 5432.
+    ports:
+      - "${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - jobportal-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-jobportal} -d ${POSTGRES_DB:-jobportal}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  jobportal-pgdata:

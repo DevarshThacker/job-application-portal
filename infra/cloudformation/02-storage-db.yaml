@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Job Application Portal - private S3 buckets and RDS PostgreSQL (single-AZ, private subnets)
+
+Parameters:
+  NetworkStackName: { Type: String, Default: jobportal-network }
+  PrivateSubnet1: { Type: AWS::EC2::Subnet::Id }
+  PrivateSubnet2: { Type: AWS::EC2::Subnet::Id }
+  DbSecurityGroup: { Type: AWS::EC2::SecurityGroup::Id }
+  DbInstanceClass: { Type: String, Default: db.t3.micro }
+  DbStorageGb: { Type: Number, Default: 20 }
+  DbEngineVersion: { Type: String, Default: "16.15" }
+  DbSecretName: { Type: String, Default: jobportal/db-master }
+
+Resources:
+  ResumeBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "jobportal-resumes-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      Tags: [{ Key: Purpose, Value: resumes }]
+  ResumeBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ResumeBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt ResumeBucket.Arn, !Sub "${ResumeBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  ArtifactBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "jobportal-artifacts-${AWS::AccountId}-${AWS::Region}"
+      PublicAccessBlockConfiguration: { BlockPublicAcls: true, BlockPublicPolicy: true, IgnorePublicAcls: true, RestrictPublicBuckets: true }
+      BucketEncryption:
+        ServerSideEncryptionConfiguration: [{ ServerSideEncryptionByDefault: { SSEAlgorithm: AES256 } }]
+      VersioningConfiguration: { Status: Enabled }
+      OwnershipControls: { Rules: [{ ObjectOwnership: BucketOwnerEnforced }] }
+      LifecycleConfiguration:
+        Rules:
+          - { Id: expire-old-releases, Status: Enabled, ExpirationInDays: 30, NoncurrentVersionExpiration: { NoncurrentDays: 7 } }
+      Tags: [{ Key: Purpose, Value: release-artifacts }]
+  ArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ArtifactBucket
+      PolicyDocument:
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource: [!GetAtt ArtifactBucket.Arn, !Sub "${ArtifactBucket.Arn}/*"]
+            Condition: { Bool: { "aws:SecureTransport": "false" } }
+
+  DbSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Private subnets for jobportal RDS
+      SubnetIds: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+  Database:
+    Type: AWS::RDS::DBInstance
+    DeletionPolicy: Delete
+    Properties:
+      DBInstanceIdentifier: jobportal-db
+      Engine: postgres
+      EngineVersion: !Ref DbEngineVersion
+      DBInstanceClass: !Ref DbInstanceClass
+      AllocatedStorage: !Ref DbStorageGb
+      StorageType: gp3
+      StorageEncrypted: true
+      MultiAZ: false
+      PubliclyAccessible: false
+      DBSubnetGroupName: !Ref DbSubnetGroup
+      VPCSecurityGroups: [!Ref DbSecurityGroup]
+      DBName: jobportal
+      MasterUsername: !Sub "{{resolve:secretsmanager:${DbSecretName}:SecretString:username}}"
+      MasterUserPassword: !Sub "{{resolve:secretsmanager:${DbSecretName}:SecretString:password}}"
+      BackupRetentionPeriod: 1
+      DeletionProtection: false
+      AutoMinorVersionUpgrade: true
+      CopyTagsToSnapshot: true
+
+Outputs:
+  ResumeBucket: { Value: !Ref ResumeBucket }
+  ArtifactBucket: { Value: !Ref ArtifactBucket }
+  DbEndpoint: { Value: !GetAtt Database.Endpoint.Address }
+  DbPort: { Value: !GetAtt Database.Endpoint.Port }

@@ -1,0 +1,24 @@
+[Unit]
+Description=Job Application Portal API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=jobportal
+Group=jobportal
+WorkingDirectory=/opt/jobportal/app/backend
+EnvironmentFile=/etc/jobportal/app.env
+ExecStart=/usr/bin/node src/server.js
+Restart=on-failure
+RestartSec=3
+KillSignal=SIGTERM
+TimeoutStopSec=15
+NoNewPrivileges=true
+ProtectSystem=full
+ProtectHome=true
+PrivateTmp=true
+SyslogIdentifier=jobportal-api
+
+[Install]
+WantedBy=multi-user.target

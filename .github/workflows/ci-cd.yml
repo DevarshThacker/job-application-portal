@@ -1,0 +1,123 @@
+name: CI/CD
+
+# GitHub Actions = trigger + build + test + package.  AWS CodeDeploy = deployment.
+# (AWS CodePipeline / CodeBuild are blocked in the Learner Lab - see docs/aws-permission-audit.md)
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  ARTIFACT_BUCKET: jobportal-artifacts-543565956032-us-east-1
+  CODEDEPLOY_APP: jobportal
+
+jobs:
+  build-test:
+    name: Build, test, package
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: postgres, POSTGRES_PASSWORD: postgres, POSTGRES_DB: jobportal }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 3s --health-retries 10
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/jobportal?schema=public
+      JWT_SECRET: ci-only-secret-ci-only-secret-ci-only
+    outputs:
+      release_id: ${{ steps.meta.outputs.release_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            backend/package-lock.json
+            frontend/package-lock.json
+      - name: Install backend dependencies
+        run: npm ci --prefix backend && npx --prefix backend prisma generate --schema backend/prisma/schema.prisma
+      - name: Install frontend dependencies
+        run: npm ci --prefix frontend
+      - name: Lint
+        run: npm run lint --prefix backend && npm run lint --prefix frontend
+      - name: Backend tests (Vitest + Supertest, real PostgreSQL)
+        run: npm test --prefix backend
+      - name: Frontend tests (Vitest + Testing Library)
+        run: npm test --prefix frontend
+      - name: Build frontend
+        run: npm run build --prefix frontend
+      - name: Package release artifact
+        id: meta
+        run: |
+          RELEASE_ID="${GITHUB_SHA::12}"
+          ./deploy/package.sh "$RELEASE_ID"
+          echo "release_id=$RELEASE_ID" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.meta.outputs.release_id }}
+          path: dist-release/jobportal-${{ steps.meta.outputs.release_id }}.tgz
+          if-no-files-found: error
+          retention-days: 14
+
+  deploy-staging:
+    name: Deploy to staging (CodeDeploy)
+    needs: build-test
+    runs-on: ubuntu-latest
+    environment: staging
+    env:
+      RELEASE_ID: ${{ needs.build-test.outputs.release_id }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { name: "release-${{ needs.build-test.outputs.release_id }}", path: dist }
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Upload the release artifact to S3 (the same object is used for production)
+        run: aws s3 cp "dist/jobportal-$RELEASE_ID.tgz" "s3://$ARTIFACT_BUCKET/releases/jobportal-$RELEASE_ID.tgz" --only-show-errors
+      - name: Deploy to staging and wait (hooks run health checks + smoke tests)
+        run: |
+          DID=$(aws deploy create-deployment --application-name "$CODEDEPLOY_APP" --deployment-group-name staging \
+            --s3-location "bucket=$ARTIFACT_BUCKET,key=releases/jobportal-$RELEASE_ID.tgz,bundleType=tgz" \
+            --description "staging $RELEASE_ID (run ${{ github.run_id }})" --query deploymentId --output text)
+          echo "Deployment: $DID"
+          aws deploy wait deployment-successful --deployment-id "$DID" || {
+            aws deploy get-deployment --deployment-id "$DID" --query 'deploymentInfo.[status,errorInformation]' --output json
+            exit 1; }
+          aws deploy get-deployment --deployment-id "$DID" --query 'deploymentInfo.status' --output text
+
+  deploy-production:
+    name: Deploy to production (manual approval, same artifact)
+    needs: [build-test, deploy-staging]
+    runs-on: ubuntu-latest
+    # Configure "Required reviewers" on this environment in GitHub: Settings -> Environments -> production
+    environment: production
+    env:
+      RELEASE_ID: ${{ needs.build-test.outputs.release_id }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Deploy the SAME tested artifact to production
+        run: |
+          aws s3api head-object --bucket "$ARTIFACT_BUCKET" --key "releases/jobportal-$RELEASE_ID.tgz" >/dev/null
+          DID=$(aws deploy create-deployment --application-name "$CODEDEPLOY_APP" --deployment-group-name production \
+            --s3-location "bucket=$ARTIFACT_BUCKET,key=releases/jobportal-$RELEASE_ID.tgz,bundleType=tgz" \
+            --description "production $RELEASE_ID (run ${{ github.run_id }})" --query deploymentId --output text)
+          echo "Deployment: $DID"
+          aws deploy wait deployment-successful --deployment-id "$DID" || {
+            aws deploy get-deployment --deployment-id "$DID" --query 'deploymentInfo.[status,errorInformation]' --output json
+            exit 1; }
+          aws deploy get-deployment --deployment-id "$DID" --query 'deploymentInfo.status' --output text
