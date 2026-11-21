@@ -10,8 +10,8 @@ Parameters:
   PrivateSubnet2Cidr: { Type: String, Default: 10.0.12.0/24 }
   AdminCidr:
     Type: String
-    Description: Your public IP /32 - allowed to reach the app servers directly on port 80 (remove later)
-    AllowedPattern: '^\d{1,3}(\.\d{1,3}){3}/32$'
+    Description: Your public IP or small ISP range (/20-/32) - allowed to reach the app servers directly on port 80 (remove later)
+    AllowedPattern: '^\d{1,3}(\.\d{1,3}){3}/(2[0-9]|3[0-2])$'
 
 Resources:
   Vpc:

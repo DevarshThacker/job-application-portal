@@ -4,6 +4,7 @@ import bcrypt from 'bcryptjs';
 import { PrismaClient } from '@prisma/client';
 import path from 'node:path';
 import fs from 'node:fs/promises';
+import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
 
 const prisma = new PrismaClient();
 const ADMIN_PW = process.env.SEED_ADMIN_PASSWORD || 'Admin@12345';
@@ -106,12 +107,19 @@ async function main() {
   const resumes = [];
   for (const c of cusers) {
     let resume = await prisma.resume.findFirst({ where: { candidateId: c.id } });
-    if (!resume && (process.env.STORAGE_DRIVER || 'local') === 'local') {
+    if (!resume) {
       const key = `resumes/${c.id}/seed-resume.pdf`;
-      const full = path.join(uploadRoot, key);
-      await fs.mkdir(path.dirname(full), { recursive: true });
       const buf = demoPdf(c.name);
-      await fs.writeFile(full, buf);
+      if ((process.env.STORAGE_DRIVER || 'local') === 's3') {
+        // Same bucket/prefix the app uses; credentials come from the instance role.
+        await new S3Client({ region: process.env.AWS_REGION }).send(new PutObjectCommand({
+          Bucket: process.env.S3_BUCKET, Key: (process.env.S3_KEY_PREFIX || '') + key, Body: buf, ContentType: 'application/pdf', ServerSideEncryption: 'AES256',
+        }));
+      } else {
+        const full = path.join(uploadRoot, key);
+        await fs.mkdir(path.dirname(full), { recursive: true });
+        await fs.writeFile(full, buf);
+      }
       resume = await prisma.resume.create({ data: { candidateId: c.id, fileName: `${c.name.replace(/\s+/g, '_')}_Resume.pdf`, storageKey: key, contentType: 'application/pdf', fileSize: buf.length } });
     }
     if (resume) resumes.push(resume);
